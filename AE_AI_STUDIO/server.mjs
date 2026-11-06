@@ -148,51 +148,29 @@ function selectToolsForMessage(message) {
     "get_house_style"
   ];
 
+  // Keep the design toolset focused. Sending every write tool and its full
+  // JSON schema can exceed small local models' context window; Ollama may then
+  // expose only the last few tools (often screenshots and run_batch).
+  // These are the core tools needed for a 2D HUD workflow.
   const designTools = [
     "create_comp",
     "set_active_comp",
-
     "create_shape_layer",
     "create_text_layer",
     "create_solid_layer",
-    "create_null_layer",
-    "create_precomp_layer",
-
-    "duplicate_layer",
-    "set_layer",
-    "parent_layer",
-    "reorder_layer",
-
     "set_transform",
     "add_keyframe",
     "set_interpolation",
     "set_temporal_ease",
-    "set_spatial_tangents",
-    "copy_animation",
-
     "add_effect",
     "set_effect_param",
-    "set_effect_enabled",
-
     "set_text",
     "add_text_animator",
-
     "add_shape_content",
     "set_shape_property",
     "set_shape_path",
-
-    "add_mask",
-    "set_mask",
-
-    "add_marker",
-
-    "add_camera_layer",
-    "add_light_layer",
-
     "screenshot_frame",
-    "screenshot_layer",
-
-    "run_batch"
+    "screenshot_layer"
   ];
 
   const selectedNames =
@@ -211,6 +189,12 @@ function selectToolsForMessage(message) {
   console.log(
     selectedTools.map(tool => tool.name).join(", ")
   );
+  const schemaChars = selectedTools.reduce(
+    (total, tool) => total + JSON.stringify(tool.inputSchema || {}).length,
+    0
+  );
+  console.log(`Modele gönderilen araç sayısı: ${selectedTools.length}`);
+  console.log(`Araç şemalarının toplam boyutu: ${schemaChars} karakter`);
   console.log("==================================\n");
 
   return {
@@ -656,7 +640,7 @@ ${designContext}
 
           options: {
             temperature: 0.1,
-            num_ctx: 4096
+            num_ctx: 8192
           }
         })
       }
