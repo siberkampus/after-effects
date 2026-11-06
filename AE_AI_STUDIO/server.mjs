@@ -34,8 +34,8 @@ const BLOCKED_TOOLS = new Set([
 
 // Ollama bağlantısı için geniş zaman aşımı.
 const ollamaAgent = new Agent({
-  headersTimeout: 300000,
-  bodyTimeout: 600000,
+  headersTimeout: 900000,
+  bodyTimeout: 900000,
   connectTimeout: 30000
 });
 
@@ -729,7 +729,7 @@ ${designContext}
       {
         method: "POST",
 
-        // Beş dakikalık Undici zaman aşımı ayarlarını kullan.
+        // Ollama ilk token ve akış yanıtları için geniş zaman aşımı.
         dispatcher: ollamaAgent,
 
         headers: {
@@ -1114,8 +1114,8 @@ server.listen(PORT, () => {
   console.log(`Model: ${MODEL}`);
   console.log(`Maksimum araç turu: ${MAX_TOOL_ROUNDS}`);
   console.log(`Maksimum araç çağrısı: ${MAX_TOOL_CALLS}`);
-  console.log("Ollama başlık zaman aşımı: 300 saniye");
-  console.log("Ollama bağlam uzunluğu: 4096");
+  console.log("Ollama başlık zaman aşımı: 900 saniye");
+  console.log("Ollama bağlam uzunluğu: 8192");
   console.log("==================================\n");
 });
 
