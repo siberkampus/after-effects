@@ -1,0 +1,14 @@
+{
+  "name": "engine-room",
+  "owner": {
+    "name": "Engine Room",
+    "url": "https://github.com/Engine-Room-Games"
+  },
+  "plugins": [
+    {
+      "name": "after-effects",
+      "source": "./plugin",
+      "description": "Control Adobe After Effects with AI — describe the animation you want and it gets built: layers, keyframes, effects, expressions and text, all editable afterwards."
+    }
+  ]
+}

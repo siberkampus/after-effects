@@ -1,0 +1,680 @@
+name: CI
+
+# Builds and smoke-tests on both hosts After Effects runs on. The CEP install
+# path cannot be tested here (no AE on a runner), but this does catch the things
+# that actually break a port: platform-specific path handling, module
+# resolution, and the server failing to start.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+        # Both LTS lines that are still supported. 20 went EOL 2026-04-30;
+        # release.yml builds on 24, so 24 must stay in here.
+        node: ["22", "24"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node }}
+
+      - run: npm ci
+      - run: npm run build
+
+      - name: Version strings agree
+        run: node scripts/sync-version.mjs --check
+
+      # The skills and commands under plugin/ are generated from the guide and
+      # prompt sources. A hand-edit there would be silently overwritten by the
+      # next build, so it has to fail here instead.
+      - name: Generated guides and prompts are in sync
+        run: node scripts/build-guides.mjs --check
+
+      # A floor alone cannot catch the realistic regression, which is one tool
+      # silently dropped: at >=70 with 76 defined, six could vanish and this
+      # stayed green. So the count is checked against OpSchemas — the registry
+      # tools/list is built from — which catches a schema that never reaches the
+      # wire, and the floor is raised to the real number, which catches a tool
+      # deleted from OpSchemas itself. Raise the floor when tools are added.
+      - name: Server starts and lists every tool it defines
+        shell: bash
+        run: |
+          node -e '
+            const {spawn}=require("child_process");
+            const c=spawn(process.execPath,["packages/mcp-server/dist/index.js"],{stdio:["pipe","pipe","inherit"]});
+            let buf="",id=0;const pend=new Map();
+            c.stdout.on("data",d=>{buf+=d;let i;while((i=buf.indexOf("\n"))>=0){const l=buf.slice(0,i);buf=buf.slice(i+1);
+              if(!l.trim())continue;try{const m=JSON.parse(l);if(m.id&&pend.has(m.id)){pend.get(m.id)(m);pend.delete(m.id);}}catch{}}});
+            const send=(m,p)=>new Promise(r=>{const my=++id;pend.set(my,r);c.stdin.write(JSON.stringify({jsonrpc:"2.0",id:my,method:m,params:p})+"\n");});
+            (async()=>{
+              const {OpSchemas}=await import("./packages/shared/dist/schemas.js");
+              const defined=Object.keys(OpSchemas).length;
+              await send("initialize",{protocolVersion:"2024-11-05",capabilities:{},clientInfo:{name:"ci",version:"1"}});
+              c.stdin.write(JSON.stringify({jsonrpc:"2.0",method:"notifications/initialized"})+"\n");
+              const t=await send("tools/list",{});
+              const n=t.result.tools.length;
+              const served=new Set(t.result.tools.map(x=>x.name));
+              const missing=Object.keys(OpSchemas).filter(op=>!served.has(op));
+              if(missing.length){console.error(`defined in OpSchemas but not served: ${missing.join(", ")}`);process.exit(1);}
+              if(n!==defined){console.error(`tools/list served ${n} but OpSchemas defines ${defined}`);process.exit(1);}
+              const unannotated=t.result.tools.filter(x=>typeof x.annotations?.readOnlyHint!=="boolean"||typeof x.annotations?.destructiveHint!=="boolean").map(x=>x.name);
+              if(unannotated.length){console.error(`served without readOnlyHint/destructiveHint annotations: ${unannotated.join(", ")}`);process.exit(1);}
+              if(n<76){console.error(`expected >=76 tools, got ${n} — a tool was removed from OpSchemas`);process.exit(1);}
+              console.log(`${n} tools on ${process.platform}`);
+              c.kill();process.exit(0);
+            })();'
+
+      # The carriers that reach non-Claude clients: without these, everyone
+      # outside Claude Code gets the tools and none of the guidance.
+      #
+      # The prompt and resource counts are checked against the markdown that
+      # generates them rather than against a number written here. A literal
+      # went stale the moment 0.4.0 added two guides — it asserted >=3 while
+      # five were served, so two could have been dropped unnoticed — and a
+      # literal also has to be edited by whoever adds the next guide.
+      - name: Instructions, prompts and resources are served
+        shell: bash
+        run: |
+          node -e '
+            const {spawn}=require("child_process");
+            const fs=require("fs");
+            const count=d=>fs.readdirSync(d).filter(f=>f.endsWith(".md")).length;
+            const guideSources=count("packages/mcp-server/src/guides");
+            const promptSources=count("packages/mcp-server/src/prompts");
+            const c=spawn(process.execPath,["packages/mcp-server/dist/index.js"],{stdio:["pipe","pipe","inherit"]});
+            let buf="",id=0;const pend=new Map();
+            c.stdout.on("data",d=>{buf+=d;let i;while((i=buf.indexOf("\n"))>=0){const l=buf.slice(0,i);buf=buf.slice(i+1);
+              if(!l.trim())continue;try{const m=JSON.parse(l);if(m.id&&pend.has(m.id)){pend.get(m.id)(m);pend.delete(m.id);}}catch{}}});
+            const send=(m,p)=>new Promise(r=>{const my=++id;pend.set(my,r);c.stdin.write(JSON.stringify({jsonrpc:"2.0",id:my,method:m,params:p})+"\n");});
+            const fail=m=>{console.error(m);process.exit(1);};
+            (async()=>{
+              const init=await send("initialize",{protocolVersion:"2024-11-05",capabilities:{},clientInfo:{name:"ci",version:"1"}});
+              c.stdin.write(JSON.stringify({jsonrpc:"2.0",method:"notifications/initialized"})+"\n");
+              if(!init.result.instructions?.includes("ae_guide")) fail("initialize did not carry instructions");
+              if(init.result.instructions.length>1500) fail(`instructions is ${init.result.instructions.length} chars and resident in every session — put the detail in a guide`);
+              for(const k of ["prompts","resources"]) if(!init.result.capabilities[k]) fail(`capability ${k} missing`);
+              const prompts=(await send("prompts/list",{})).result.prompts;
+              if(prompts.length!==promptSources) fail(`${promptSources} files in src/prompts but ${prompts.length} prompts served`);
+              const got=await send("prompts/get",{name:"report-ae-issue",arguments:{arguments:"xyzzy"}});
+              const text=got.result.messages[0].content.text;
+              if(text.includes("$ARGUMENTS")||!text.includes("xyzzy")) fail("prompt arguments were not substituted");
+              const all=(await send("resources/list",{})).result.resources;
+              // The live project resources (issue #248) are listed beside the guides.
+              const res=all.filter((r)=>r.uri.startsWith("ae://guide/"));
+              if(res.length!==guideSources) fail(`${guideSources} files in src/guides but ${res.length} guide resources served`);
+              for(const u of ["ae://project/summary","ae://project/active-comp"]) if(!all.some((r)=>r.uri===u)) fail(`live resource ${u} not listed`);
+              if(!init.result.capabilities.resources.subscribe) fail("resources.subscribe capability missing");
+              const read=await send("resources/read",{uri:"ae://guide/after-effects"});
+              if(!read.result.contents[0].text.startsWith("# Driving After Effects")) fail("resource body wrong");
+              const guide=await send("tools/call",{name:"ae_guide",arguments:{topic:"style-guide"}});
+              if(guide.result.isError) fail("ae_guide errored");
+              console.log(`instructions ${init.result.instructions.length} chars, ${prompts.length} prompts, ${res.length} resources`);
+              c.kill();process.exit(0);
+            })();'
+
+      # Every branch here is a different sentence said to a user mid-upgrade,
+      # and none of them are reachable from a normal green-path run.
+      - name: Panel version mismatches are diagnosed correctly
+        run: node tests/unit/panel-version.mjs
+
+      # Issue #243: the gate compared bundle.jsx only, so a current bundle
+      # beside stale client code passed. The panel and the server compute the
+      # client hash separately and must agree; a signed install must match.
+      - name: Panel client hash matches between panel and server
+        run: node tests/unit/panel-hash.mjs
+
+      # Issue #243, found live: a cleanly installed older panel was called a
+      # "mix of two versions". Uniformly older is update-needed; only one half
+      # current is partial-install.
+      - name: An older panel is told to update, a mixed one to reinstall
+        run: node tests/unit/check-setup-panel.mjs
+
+      # Since #243 screenshots, run_jsx, the house style and batch chunks reach
+      # After Effects under internal op names; messages must name the tool.
+      - name: Wait and timeout messages name the tool, not the internal op
+        run: node tests/unit/op-names.mjs
+
+      # Issue #156: a stale verdict was cached forever, and AE restarts on the
+      # same port, so "restart After Effects" outlived the restart.
+      - name: A stale panel verdict is re-checked after a restart
+        run: node tests/unit/panel-gate.mjs
+
+      # No AE on a runner means nothing else here loads the panel's client code,
+      # and the Windows form of this bug reads as a missing bundle.jsx.
+      - name: Panel resolves the extension path CEP hands it
+        run: node tests/unit/panel-paths.mjs
+
+      # The panel had never been booted by anything but After Effects, and it
+      # turned out not to boot at all: CEP anchors __dirname at the extension
+      # root, so requiring a file sitting next to main.js failed. This runs the
+      # real main.js against a stub CEP host in a copy of the installed layout.
+      - name: Panel boots from the layout setup_panel installs
+        run: node tests/unit/panel-boot.mjs
+
+      # Issue #283: the bridge is a hidden, auto-started extension with Node;
+      # the visible status panel runs no second bridge.
+      - name: Panel manifest keeps the bridge hidden and the status panel inert
+        run: node tests/unit/panel-manifest.mjs
+
+      # Installing while AE holds the client files open updates the bundle and
+      # fails on the rest, and a check that hashed only the bundle went green on
+      # a mix of two versions. This is the per-file diff that outranks it.
+      - name: A half-written panel install is detected
+        run: node tests/unit/panel-install.mjs
+
+      - name: setup_panel refuses while After Effects is running (#262)
+        run: node tests/unit/setup-panel-ae-running.mjs
+
+      # A busy AE and a dead bridge are the same event at the socket layer, and
+      # the only difference the user sees is which remedy we prescribe.
+      - name: Bridge timeouts are diagnosed apart from disconnections
+        run: node tests/unit/bridge-timeout.mjs
+
+      # A user holding After Effects (a menu, a dialog, a text edit, a preview)
+      # must cost one timeout, not one per call: the next call is refused
+      # unsent, fast, while AE is still on the stuck one.
+      - name: Calls behind a stuck call are refused unsent, not queued
+        run: node tests/unit/busy-guard.mjs
+
+      # Issue #106: the bridge is on 127.0.0.1 and /op is an eval inside After
+      # Effects, so a web page reaching it is arbitrary code execution as the
+      # user. Dropping the CORS header does not close that — a text/plain POST
+      # is never preflighted — so this asserts the token gate itself, and fires
+      # that exact request shape.
+      - name: The bridge refuses anyone who is not the MCP server
+        run: node tests/unit/bridge-auth.mjs
+
+      # Issue #92: the server follows the panel when its cached port is refused,
+      # and check_setup names a port disagreement instead of prescribing a restart.
+      - name: A stale bridge port is rediscovered, not restarted around
+        run: node tests/unit/port-drift.mjs
+
+      # Issue #91: CEP refusing the panel's signature is read out of CEP's own
+      # log, on both platforms' path shapes, and a signed install stays current.
+      - name: CEP signature refusals are diagnosed from the CEP log
+        run: node tests/unit/cep-signature.mjs
+
+      # Issue #182: a release ships the panel signed so it loads without
+      # PlayerDebugMode. The signature covers every file, so packaging puts ws
+      # inside before signing, setup_panel copies it verbatim, the dev path stays
+      # unsigned, and check_setup stops demanding the debug flag for it. A stub
+      # plays ZXPSignCmd; the real tool runs only in a release.
+      - name: The signed panel is packaged, installed and checked intact
+        run: node tests/unit/panel-signing.mjs
+
+      # render_queue renders in an aerender process the server owns: progress
+      # off its stdout, outputs verified on disk, and a cancel that stops the
+      # whole process tree — against a fake aerender, on both hosts (#173):
+      # Windows starts the fake through node and stops it with taskkill /T.
+      - name: Render queue jobs are honest about progress, output and cancel
+        run: node tests/unit/render-queue.mjs
+
+      # Issues #144 and #145: missing footage is refused only when the render
+      # reads it, and footage the temp copy could not find — moved since the
+      # last save, or deleted while open — is refused before anything renders,
+      # read from the saved .aep rather than from aerender's English output.
+      - name: Render queue refuses exactly the footage a render would miss
+        run: node tests/unit/render-footage.mjs
+
+      # Issues #162 and #168: the release reads Apple's notarization verdict
+      # rather than trusting --wait, and smoke-runs every artifact before the
+      # tag. The decisions are pure; the smoke run starts the built server.
+      - name: Release checks catch a rejected notarization and a dead artifact
+        run: node tests/unit/release-checks.mjs
+
+      # Issues #147 and #157: an unknown key is refused at every depth rather
+      # than stripped behind an {ok:true}, and a run_batch step is validated —
+      # defaults applied — exactly as the tool it names, or the batch is refused.
+      - name: Tool arguments are closed, in a batch as well as direct
+        run: node tests/unit/strict-args.mjs
+
+      # Issue #172: the live After Effects driver (tests/live/) minus After
+      # Effects — its stdio framing, its safety guards, and every recipe
+      # fixture checked against the real op schemas, so a fixture that would
+      # only fail on the next live pass fails here instead.
+      - name: Live driver guards and recipe fixtures hold without After Effects
+        run: node tests/unit/live-driver.mjs
+
+      # Issues #149 and #150: set_layer's trackMatte.layerId sets the matte, and
+      # an unknown blend, matte or mask mode name is refused, not ignored.
+      - name: Track mattes land and AE enumeration names are closed
+        run: node tests/unit/layer-enum-names.mjs
+
+      # keyframe:true without time used to write a static value, and a 2D layer
+      # dropped orientation/X/Y rotation, both behind {ok:true} (#151, #152).
+      - name: A keyframe needs a time, and 3D-only transforms are refused on 2D
+        run: node tests/unit/keyframe-transform.mjs
+
+      # set_transform, set_effect_param and set_shape_property share one
+      # set-or-keyframe helper (#184); it keeps every rule the three copies had.
+      - name: One set-or-keyframe path for transforms, effect params and shape properties
+        run: node tests/unit/set-or-key.mjs
+
+      # Issue #207: set_mask applies closed and the tangents without new
+      # vertices; #163: set_shape_path finds its Path by match name.
+      - name: Mask and shape paths apply every field and resolve by match name
+        run: node tests/unit/mask-path.mjs
+
+      # Issue #163: the server exits with its stdin, a dropped connection is not
+      # re-sent as a refusal, a finished render does not wait on the write
+      # queue, and the panel escapes U+2028/U+2029 and queues /reload-jsx.
+      - name: Hardening batch (#163) holds
+        run: node tests/unit/hardening-163.mjs
+
+      # #181: layer/comp switches, separate dimensions, keyframe flags and
+      # per-dimension ease, box text and the Repeater's Transform group.
+      - name: Capability gaps reach After Effects and are read back
+        run: node tests/unit/capability-gaps.mjs
+
+      # #170: every colour field takes hex (a `value` only on a colour
+      # property), and a propertyPath that misses lists what is there, capped.
+      - name: Hex colours convert, and a missed path lists its children
+        run: node tests/unit/hex-colour.mjs
+
+      # analyze_motion: the panel gathers raw keys (run against the fake AE),
+      # the server turns them into moves, eases, overshoot and staggers, and
+      # the agent gets a bounded summary, never the keys (issue #244).
+      - name: A motion style is read off animated comps, bounded
+        run: node tests/unit/motion-style.mjs
+      # #248: live project resources — no subscriber, no After Effects traffic;
+      # a change notifies once; a refresh never runs beside a write.
+      - name: Live resources poll only while subscribed, and notify on change
+        run: node tests/unit/live-resources.mjs
+
+      # Real image code, written against a 16-bit project nobody here has: a
+      # frame that decodes on the far side of the wire is the only thing that
+      # makes a screenshot worth taking.
+      - name: Panel normalises PNG frames to 8-bit
+        run: node tests/unit/png-codec.mjs
+
+      # Deciding that two identical frames mean a stale render buffer rather
+      # than a static comp is the difference between a useful error and a false
+      # alarm on every screenshot of a title card.
+      - name: Panel tells a stale render from a repeated request
+        run: node tests/unit/frame-cache.mjs
+
+      # saveFrameToPng returns before the bytes are on disk, and the panel used
+      # to call a frame finished once its size stopped changing for 30ms. On a
+      # heavy comp that is a pause, not an ending, so half-written PNGs went out
+      # as successful screenshots (#45). Completion is structural now, and this
+      # runs the real poll loop over files the test grows by hand.
+      - name: A half-written frame is never delivered
+        run: node tests/unit/frame-integrity.mjs
+
+      # Every requested time keeps its cell even when its render failed, and the
+      # time is burned into the picture rather than only reported beside it.
+      - name: Contact sheets tile and label what was asked for
+        run: node tests/unit/contact-sheet.mjs
+
+      # The wiring neither of those two can see: a failed read must never be
+      # delivered and never cached, while a genuinely re-served buffer must still
+      # be caught. Boots the real client/main.js against a stub CEP host.
+      - name: The screenshot pipeline holds end to end
+        run: node tests/unit/screenshot-pipeline.mjs
+
+      # Stage 4 of #220 moved the image work to the server and left the panel
+      # its copy for older servers. Both must give the same bytes and the same
+      # refusals on the same renders — module by module, and end to end through
+      # the real client/main.js.
+      - name: The server's image code matches the panel's byte for byte
+        run: node tests/unit/image-parity.mjs
+
+      # The stale-frame window is one per After Effects, shared by every server
+      # process on a panel port: B must refuse a buffer AE rendered for A.
+      - name: Server processes on one After Effects share the stale-frame window
+        run: node tests/unit/frame-cache-shared.mjs
+
+      # Rendering smaller is how downsampling works at all on Windows, and the
+      # factor is derived when the caller omits one. A default of 1 in the zod
+      # schema would reach the panel as an explicit 1 and silently disable it.
+      - name: Screenshot downsampling derives and restores the comp resolution
+        run: node tests/unit/screenshot-resolution.mjs
+
+      # Archive surgery on a file the user is about to hand to an editor: a
+      # thumbnail worth looking at is not worth a corrupt .mogrt, so every
+      # entry the patch does not mean to touch is checked byte-for-byte.
+      - name: Panel rewrites a .mogrt thumbnail without corrupting the archive
+        run: node tests/unit/mogrt-thumbnail.mjs
+      # The journal is read when something has already failed, so a compact
+      # index that stopped short of the workaround would be worse than the
+      # oversized listing it replaced.
+      - name: Issue journal reads are scoped and still lead somewhere
+        run: node tests/unit/issue-journal.mjs
+      # There is no AE and no ExtendScript runtime on a runner, so these run the
+      # .jsx sources under node against stubs: the ban on chained ternaries
+      # (which AE parses left-associatively and returns the wrong answer for),
+      # undo-group balance, run_jsx's result serialization, the shape walk's
+      # omissions, and parent_layer's transform arithmetic. The last one builds the bundle twice and compares
+      # the bytes, because the panel version gate is only meaningful if the
+      # bundle hash identifies the code rather than the build.
+      - name: ExtendScript sources behave
+        run: |
+          node tests/unit/jsx-ternary.mjs
+          node tests/unit/jsx-undo-group.mjs
+          node tests/unit/run-jsx-undo-guard.mjs
+          node tests/unit/run-jsx-result.mjs
+          node tests/unit/shape-read.mjs
+          node tests/unit/parent-transform.mjs
+          node tests/unit/svg-import.mjs
+          node tests/unit/bundle-determinism.mjs
+
+      # Issue #185: After Effects runs every extension and script in one shared
+      # ExtendScript engine. The built bundle must publish one global, leave
+      # other scripts' globals alone, and keep working when they replace ours.
+      - name: The bundle survives a hostile neighbour in the shared engine
+        run: node tests/unit/bundle-namespace.mjs
+
+      # Issue #164: Node runs the .jsx happily on syntax ExtendScript rejects,
+      # and AE then refuses the whole bundle. build:jsx refuses to write such a
+      # bundle; this holds the checker itself (ES5 parse, ES3 reserved words,
+      # missing ES5 built-ins).
+      - name: bundle.jsx contains nothing ExtendScript cannot run
+        run: node tests/unit/extendscript-syntax.mjs
+
+      # Issue #129: a setValue that throws for a write that landed must not
+      # make an op report failure, or roll back, for work that happened.
+      - name: A write that landed is never reported as failed
+        run: node tests/unit/set-value-readback.mjs
+
+      # run_jsx is the tool an agent reaches for when nothing else fits, so the
+      # thing that matters most is that a failure reads as a failure: the line
+      # number points at the line the reader has to open, a library's error
+      # names the library, and arguments and helpers land in the script's scope.
+      - name: run_jsx reports where a script actually broke
+        run: |
+          node tests/unit/run-jsx-lines.mjs
+          node tests/unit/run-jsx-source.mjs
+          node tests/unit/run-jsx-assembly.mjs
+          node tests/unit/run-jsx-args.mjs
+          node tests/unit/run-jsx-helpers.mjs
+
+      # The 0.4.0 ops, none of which any gate ran before this: the comp
+      # snapshot/diff pair, duplicate_comp, audio cue placement, the shape spawn
+      # point, reorder_layer's move methods, the ease array arity that decides
+      # spatial from non-spatial, the batch undo guarantee, and the mogrt
+      # preconditions that refuse an export rather than blaming a dialog.
+      - name: The ops added in 0.4.0 behave
+        run: |
+          node tests/unit/comp-snapshot.mjs
+          node tests/unit/comp-diff-server.mjs
+          node tests/unit/mcp-apps.mjs
+          node tests/unit/duplicate-comp.mjs
+          node tests/unit/comp-checkpoint.mjs
+          node tests/unit/audio-cues.mjs
+          node tests/unit/shape-spawn.mjs
+          node tests/unit/reorder-layer.mjs
+          node tests/unit/ease-arity.mjs
+          node tests/unit/batch-undo.mjs
+          node tests/unit/mogrt-preconditions.mjs
+
+      # #220 stage 2: the export/render/import file checks run on the server.
+      # Each port is held to the jsx it came from on real folders (the jsx
+      # copies still run after it), and the server is driven against a stub
+      # bridge to pin the round trips and the comp-first refusal order.
+      - name: File checks on the server match the panel's
+        run: |
+          node tests/unit/destination-checks.mjs
+          node tests/unit/file-ops-server.mjs
+
+      # Issue #220, stage 3: the panel's capabilities on /health, and the house
+      # style's file I/O on the server for a panel reporting project-path —
+      # legacy panels keep the old path, and style.jsx parity on real folders.
+      - name: Panel capabilities and the house style on the server
+        run: node tests/unit/panel-capabilities.mjs
+
+      # add_essential_property (#177): the panel is read back, never the add's
+      # boolean, and a property AE cannot take is refused before anything moves.
+      - name: Essential Graphics properties are added honestly
+        run: node tests/unit/essential-property.mjs
+
+      # 0.5.0: delete_comp's purgeUnusedSolids and purge_unused_footage (#83).
+      # A solid's footage item outlives its layer, so both ops decide by
+      # `usedIn`, on footage only, and a dry run must not be an undo step.
+      - name: The ops added in 0.5.0 behave
+        run: |
+          node tests/unit/purge-footage.mjs
+
+      # retime_keyframes and copy_animation (#180): every key attribute
+      # survives the remove-and-rewrite, and a collision is refused, not merged.
+      - name: Retiming and copying animation keeps the eases
+        run: |
+          node tests/unit/retime-animation.mjs
+
+      # The guidance carriers, from the other side: that the guide sources
+      # cross-reference files that exist, and that a house style is digested to
+      # something small enough to be worth returning by default.
+      - name: Guidance is internally consistent
+        run: |
+          node tests/unit/guide-references.mjs
+          node tests/unit/house-style-summary.mjs
+
+      # Three 0.5.0 correctness fixes, each a write or read that used to look
+      # right and was not: find_layers' bounded default and its echo, the
+      # justification read-back after a Source Text round trip, and
+      # expressionError surfacing a broken expression at the call that wrote it.
+      - name: Reads are bounded and writes are verified
+        run: |
+          node tests/unit/find-layers.mjs
+          node tests/unit/get-selection.mjs
+          node tests/unit/effect-params.mjs
+          node tests/unit/text-justification.mjs
+          node tests/unit/text-animator.mjs
+          node tests/unit/expression-error.mjs
+
+      # Issue #121: a display-name lookup that misses on a localised After
+      # Effects must name the effect's parameters and point at paramMatchName.
+      - name: Effect parameter lookup fails with the alternatives
+        run: |
+          node tests/unit/effect-param-lookup.mjs
+      # Release history is read once per release per project and then never
+      # again, which only works if whats-new.md keeps the shape a machine can
+      # filter: every ## a release, newest first, a section for the version
+      # being built, and `supersedes:` lines plain enough to grep a project's
+      # notes with. The second file proves the scaffold stamps the version the
+      # absorb flow later compares against, through both entry points.
+      - name: Release history filters by version and the scaffold records one
+        run: |
+          node tests/unit/whats-new.mjs
+          node tests/unit/scaffold-marker.mjs
+
+      # Three distributions carry the panel and none of them is built on a pull
+      # request, so what ships is asserted from the source tree and the build
+      # scripts instead. This also holds ci.yml's own test list against the one
+      # in package.json — before it, 16 of the 36 suites ran nowhere.
+      - name: What ships is complete
+        run: node tests/unit/package-layout.mjs
+
+      # Concurrency is invisible when it breaks: a queue that lets two writes
+      # overlap looks identical to one that does not until an undo group is
+      # corrupted in someone's real project. The second file drives the real
+      # server over an in-memory transport against a stub bridge on an
+      # ephemeral port, and also fails the build when an op in OpSchemas has
+      # not been classified in OpMutation.
+      - name: Writes are serialized and every op is classified
+        run: |
+          node tests/unit/write-queue.mjs
+          node tests/unit/write-queue-server.mjs
+
+      # Confirmations through MCP elicitation (#245): asked only when the client
+      # can answer, never a yes without one, no write lease while waiting.
+      - name: Destructive calls ask the user only when the client can
+        run: node tests/unit/elicitation.mjs
+
+      # The front desk (#223): real server processes sharing one fake panel —
+      # cross-session order, truthful waits, a batch's lock across sessions,
+      # a leader killed mid-request and mid-batch, a stale leader file.
+      - name: Sessions on one After Effects share one front desk
+        run: node tests/unit/front-desk.mjs
+
+      # A long run_batch driven by the server (#220, stage 5): progress exact,
+      # cancel between chunks, warnings from every chunk, a chunk's lost answer
+      # recovered from After Effects' own cursor with nothing run twice, the
+      # desk killed with a chunk at the panel, the batch's own server killed.
+      - name: The server drives a long batch, and stops it truthfully
+        run: node tests/unit/batch-driver.mjs
+
+      # Issue #243: a batch an old panel drives itself is followed over
+      # /events, and ends as lost once its end can no longer arrive.
+      - name: A batch an old panel drives is followed, and never waited on for ever
+        run: node tests/unit/followed-jobs.mjs
+
+      # Read-only mode and the run_jsx switch (#135): no write is listed or
+      # callable in read-only mode, every server op has a deliberate decision,
+      # and a run_jsx step cannot ride in through run_batch.
+      - name: The tool switches offer and refuse what they say
+        run: node tests/unit/tool-policy.mjs
+
+      # Tool annotations (#165) follow OpMutation and the read-only table, so a
+      # client never auto-approves a write as a read; and every JSON result is
+      # compact (#166), because the model re-reads it on every later turn.
+      - name: Tool annotations match OpMutation and results are compact
+        run: node tests/unit/tool-annotations.mjs
+
+      # Where a long batch's progress goes. A notification sent after its
+      # request's response is on the wire and seen by no client — that is how
+      # #82 shipped, verified by reading the stream. This drives the real SDK
+      # client with onprogress and asserts order, not presence.
+      - name: Progress reaches the request that is still open
+        run: node tests/unit/job-progress.mjs
+
+      # The SDK client handles a notification a microtask late but a response
+      # at once, so a final progress read together with the response was lost
+      # to onprogress (#261). Real server over stdio, real SDK client, with
+      # each progress read together with the next message (deterministic: all
+      # runs fail without the server's settle ping). Also: one ping per call
+      # with progress, none without; a client that ignores or refuses the
+      # ping; a call cancelled during it.
+      - name: The last progress reaches the client before the response
+        run: node tests/unit/progress-delivery.mjs
+
+      # cancel_job said ok for a cancel the panel never received, and a late
+      # complete overwrote "cancelled" (#158); await_job on an unknown id sat
+      # out its full ten minutes (#159).
+      - name: Cancel is confirmed, and an unknown job fails at once
+        run: node tests/unit/job-cancel.mjs
+
+      # Two failures at once, and the first one takes the whole server down with
+      # it: the Anthropic API rejects a tool schema that is not valid draft
+      # 2020-12, and a rejected schema breaks every tool in the session rather
+      # than the one it belongs to. So all 76 are validated against the real
+      # metaschema here. The second is quieter and was the reason for the
+      # change: the JSON Schema converter drops refinements, so a "pass exactly one of
+      # these" rule can be enforced by the server and invisible to the model.
+      - name: Tool schemas are valid 2020-12 and hide no constraints
+        run: node tests/unit/schema-constraints.mjs
+
+      # Issue #170: the tool list is resident in every session and nothing
+      # errors when it grows. A per-tool prose budget and a ceiling on the
+      # whole list; also that ae_guide's topic description names every topic.
+      - name: Tool list stays inside its token budget
+        run: node tests/unit/tool-budget.mjs
+
+      # A field a schema advertises and no handler reads is a call that answers
+      # {ok:true} having done nothing (issue #155) — how create_shape_layer's
+      # fill/stroke and set_layer's trackMatte.layerId shipped. The second file
+      # runs set_layer, set_interpolation, get_keyframes, the mask and marker
+      # ops and a get_layer_full golden through the real dispatch() against a
+      # minimal fake After Effects (issue #167); until it, nothing executed them.
+      - name: Every advertised field is read, and the core layer ops behave
+        run: |
+          node tests/unit/schema-handler-contract.mjs
+          node tests/unit/fake-ae-ops.mjs
+
+      - name: check_setup resolves platform paths without throwing
+        shell: bash
+        run: |
+          node -e '
+            import("./packages/mcp-server/dist/setup/check.js").then(async m=>{
+              const r=await m.checkSetup();
+              const platform=r.checks.find(c=>c.name==="platform");
+              const assets=r.checks.find(c=>c.name==="panelAssetsPresent");
+              console.log(`platform ok=${platform.ok} (${platform.detail})`);
+              console.log(`panel assets ok=${assets.ok}`);
+              // AE is not installed on a runner, so only these two must hold.
+              if(!platform.ok||!assets.ok) process.exit(1);
+            }).catch(e=>{console.error(e);process.exit(1);});'
+
+      # Both entry points into the same scaffold: the terminal one, and the
+      # init_project tool that clients without filesystem access rely on.
+      - name: Scaffold works from the CLI
+        shell: bash
+        run: |
+          node packages/mcp-server/dist/index.js init ci-project --with-mcp
+          test -f ci-project/AGENTS.md
+          test -f ci-project/CLAUDE.md
+          test -f ci-project/.mcp.json
+          test -f ci-project/renders/.gitkeep
+          # The version the absorb-release flow compares against, stamped from
+          # package.json at run time — never a literal.
+          grep -q "^Tools version last absorbed: $(node -p 'require("./packages/mcp-server/package.json").version')$" ci-project/AGENTS.md
+          node packages/mcp-server/dist/index.js init ci-cursor --client cursor --with-mcp
+          test -f ci-cursor/.cursor/rules/after-effects.mdc
+          test -f ci-cursor/.cursor/mcp.json
+          echo "scaffold ok"
+
+      - name: Scaffold works from the tool, and refuses to clobber
+        shell: bash
+        run: |
+          mkdir -p ci-tool-project
+          node -e '
+            const {spawn}=require("child_process");
+            const path=require("path"),fs=require("fs");
+            const entry=path.resolve("packages/mcp-server/dist/index.js");
+            const cwd=path.resolve("ci-tool-project");
+            const c=spawn(process.execPath,[entry],{stdio:["pipe","pipe","inherit"],cwd});
+            let buf="",id=0;const pend=new Map();
+            c.stdout.on("data",d=>{buf+=d;let i;while((i=buf.indexOf("\n"))>=0){const l=buf.slice(0,i);buf=buf.slice(i+1);
+              if(!l.trim())continue;try{const m=JSON.parse(l);if(m.id&&pend.has(m.id)){pend.get(m.id)(m);pend.delete(m.id);}}catch{}}});
+            const send=(m,p)=>new Promise(r=>{const my=++id;pend.set(my,r);c.stdin.write(JSON.stringify({jsonrpc:"2.0",id:my,method:m,params:p})+"\n");});
+            const fail=m=>{console.error(m);process.exit(1);};
+            (async()=>{
+              await send("initialize",{protocolVersion:"2024-11-05",capabilities:{},clientInfo:{name:"cursor",version:"1"}});
+              c.stdin.write(JSON.stringify({jsonrpc:"2.0",method:"notifications/initialized"})+"\n");
+              const first=await send("tools/call",{name:"init_project",arguments:{}});
+              if(first.result.isError) fail(`init_project failed: ${first.result.content[0].text}`);
+              const r=JSON.parse(first.result.content[0].text);
+              if(r.client!=="cursor") fail(`client detection wrong: ${r.client}`);
+              for(const rel of r.written) if(!fs.existsSync(path.join(r.dir,rel))) fail(`claimed ${rel} but it is missing`);
+              const again=await send("tools/call",{name:"init_project",arguments:{}});
+              if(!again.result.isError) fail("a second init_project must refuse rather than overwrite");
+              console.log(`init_project wrote ${r.written.join(", ")} for ${r.client}`);
+              c.kill();process.exit(0);
+            })();'
+
+      # The journal is the one piece of state this server owns, and its round
+      # trip has to survive a Windows path and a hand-edited file.
+      - name: Issue journal round-trips
+        shell: bash
+        env:
+          AE_MCP_HOME: ${{ runner.temp }}/ae-mcp-home
+        run: |
+          node -e '
+            const fs=require("fs"),path=require("path");
+            import("./packages/mcp-server/dist/issues/journal.js").then(j=>{
+              const first=j.logIssue({title:"Example: a tool failed oddly",symptom:"boom",workaround:"do it the other way",cause:"because",tools:["run_jsx"]});
+              if(first.previouslyLogged||first.occurrences!==1) throw new Error("first log should be new");
+              j.markReported(first.id,"https://example.invalid/1");
+              const again=j.logIssue({title:"Example: A TOOL FAILED ODDLY!",symptom:"boom again",workaround:"same"});
+              if(again.id!==first.id) throw new Error(`title should map to one id: ${again.id} vs ${first.id}`);
+              if(again.occurrences!==2) throw new Error("re-log should count the sighting");
+              if(!again.reported) throw new Error("a new sighting must not un-report an entry");
+              const all=j.listIssues({detail:"full"}), open=j.listIssues({status:"unreported"});
+              if(all.count!==1||open.count!==0) throw new Error(`status filter wrong: ${all.count}/${open.count}`);
+              if(all.issues[0].cause!=="because") throw new Error("a known cause must survive a sighting logged without one");
+              // Untracked by construction, not by asking the project to ignore it.
+              const ignore=path.join(all.dir,"..",".gitignore");
+              if(fs.readFileSync(ignore,"utf8").trim()!=="*") throw new Error(`journal must ignore itself: ${ignore}`);
+              console.log(`journal ok at ${all.dir} (scope ${all.scope})`);
+            }).catch(e=>{console.error(e);process.exit(1);});'

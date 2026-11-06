@@ -1,0 +1,1030 @@
+﻿
+import http from "node:http";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { Agent } from "undici";
+
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+// ==================================================
+// AYARLAR
+// ==================================================
+
+const PORT = 3000;
+const OLLAMA_URL = "http://127.0.0.1:11434";
+const MODEL = process.env.OLLAMA_MODEL || "qwen3:4b";
+
+const MCP_ENTRY =
+  "C:/Users/ACER/Documents/mcp/after-effects-mcp/packages/mcp-server/dist/index.js";
+
+const MCP_CWD =
+  "C:/Users/ACER/Documents/mcp/after-effects-mcp";
+
+const MAX_TOOL_ROUNDS = 8;
+const MAX_TOOL_CALLS = 20;
+
+const BLOCKED_TOOLS = new Set([
+  "log_issue",
+  "list_known_issues"
+]);
+
+// Ollama bağlantısı için geniş zaman aşımı.
+const ollamaAgent = new Agent({
+  headersTimeout: 300000,
+  bodyTimeout: 300000,
+  connectTimeout: 30000
+});
+
+// Tasarım öncesinde sunucunun kendisinin çalıştıracağı araçlar.
+const DESIGN_CONTEXT_TOOLS = [
+  "get_project_summary",
+  "list_comps",
+  "get_house_style"
+];
+
+// ==================================================
+// DURUM
+// ==================================================
+
+let mcpClient;
+let mcpTools = [];
+let mcpReady = false;
+let busy = false;
+
+// ==================================================
+// MCP BAĞLANTISI
+// ==================================================
+
+async function connectMcp() {
+  const transport = new StdioClientTransport({
+    command: "node",
+    args: [MCP_ENTRY],
+    cwd: MCP_CWD
+  });
+
+  mcpClient = new Client({
+    name: "ae-ai-studio",
+    version: "1.5.0"
+  });
+
+  await mcpClient.connect(transport);
+
+  const result = await mcpClient.listTools();
+
+  mcpTools = result.tools || [];
+  mcpReady = true;
+
+  console.log("\n==================================");
+  console.log("AE AI STUDIO MCP BAĞLANTISI");
+  console.log("==================================");
+  console.log(`Toplam araç: ${mcpTools.length}`);
+
+  console.log(
+    mcpTools
+      .filter(tool => !BLOCKED_TOOLS.has(tool.name))
+      .map(tool => tool.name)
+      .join(", ")
+  );
+
+  console.log("\nMCP bağlantısı hazır.");
+  console.log("==================================\n");
+}
+
+// ==================================================
+// GÖREV TÜRÜNÜ BELİRLE
+// ==================================================
+
+function classifyRequest(message) {
+  const text = String(message || "").toLocaleLowerCase("tr-TR");
+
+  const explicitReadOnly =
+    /(hiçbir şeyi değiştirme|hiçbir şeyi oluşturma|sadece kontrol|sadece listele|yalnızca kontrol|yalnızca bilgi)/i;
+
+  const designPattern =
+    /(oluştur|tasarla|tasarım yap|hazırla|animasyon yap|animasyon oluştur|animasyonlandır|hareketlendir|çiz|inşa et|üret|ekle|geliştir|hud animasyonu|motion graphics|arayüz tasarla|grafik oluştur)/i;
+
+  const readOnlyPattern =
+    /(değiştirme|silme|bilgi ver|bilgilerini getir|özetini getir|özetle|kontrol et|listele|kaç tane|hangi kompozisyon|çözünürlüğünü|fps değerini|süresini|mevcut projeyi|aktif projeyi)/i;
+
+  if (explicitReadOnly.test(text)) {
+    return "read";
+  }
+
+  if (designPattern.test(text)) {
+    return "design";
+  }
+
+  if (readOnlyPattern.test(text)) {
+    return "read";
+  }
+
+  return "read";
+}
+
+// ==================================================
+// GÖREVE GÖRE ARAÇ SEÇ
+// ==================================================
+
+function selectToolsForMessage(message) {
+  const taskType = classifyRequest(message);
+
+  const readOnlyTools = [
+    "get_project_summary",
+    "list_comps",
+    "get_comp",
+    "get_comp_tree",
+    "list_layers",
+    "get_layer_full",
+    "get_selection",
+    "find_layers",
+    "list_effects",
+    "get_keyframes",
+    "get_expression",
+    "list_available_effects",
+    "get_house_style"
+  ];
+
+  const designTools = [
+    "create_comp",
+    "set_active_comp",
+
+    "create_shape_layer",
+    "create_text_layer",
+    "create_solid_layer",
+    "create_null_layer",
+    "create_precomp_layer",
+
+    "duplicate_layer",
+    "set_layer",
+    "parent_layer",
+    "reorder_layer",
+
+    "set_transform",
+    "add_keyframe",
+    "set_interpolation",
+    "set_temporal_ease",
+    "set_spatial_tangents",
+    "copy_animation",
+
+    "add_effect",
+    "set_effect_param",
+    "set_effect_enabled",
+
+    "set_text",
+    "add_text_animator",
+
+    "add_shape_content",
+    "set_shape_property",
+    "set_shape_path",
+
+    "add_mask",
+    "set_mask",
+
+    "add_marker",
+
+    "add_camera_layer",
+    "add_light_layer",
+
+    "screenshot_frame",
+    "screenshot_layer",
+
+    "run_batch"
+  ];
+
+  const selectedNames =
+    taskType === "design"
+      ? designTools
+      : readOnlyTools;
+
+  const selectedTools = mcpTools.filter(tool =>
+    selectedNames.includes(tool.name) &&
+    !BLOCKED_TOOLS.has(tool.name)
+  );
+
+  console.log("\n==================================");
+  console.log(`GÖREV TÜRÜ: ${taskType}`);
+  console.log("MODELE GÖNDERİLEN ARAÇLAR:");
+  console.log(
+    selectedTools.map(tool => tool.name).join(", ")
+  );
+  console.log("==================================\n");
+
+  return {
+    taskType,
+    selectedTools
+  };
+}
+
+// ==================================================
+// TASARIM ÖNCESİ PROJE BİLGİSİNİ AL
+// ==================================================
+
+async function getDesignContext(activity) {
+  console.log("\n==================================");
+  console.log("TASARIM ÖNCESİ PROJE BİLGİSİ ALINIYOR");
+  console.log("==================================");
+
+  const contextParts = [];
+
+  for (const name of DESIGN_CONTEXT_TOOLS) {
+    const knownTool = mcpTools.find(
+      tool => tool.name === name
+    );
+
+    if (!knownTool) {
+      contextParts.push(
+        `### ${name}\nBu araç MCP sunucusunda bulunamadı.`
+      );
+
+      continue;
+    }
+
+    const activityItem = {
+      type: "tool",
+      name,
+      status: "running"
+    };
+
+    activity.push(activityItem);
+
+    try {
+      console.log(`Proje bilgisi alınıyor: ${name}`);
+
+      const result = await mcpClient.callTool({
+        name,
+        arguments: {}
+      });
+
+      if (result?.isError) {
+        throw new Error(toolResultToText(result));
+      }
+
+      const resultText = toolResultToText(result);
+
+      activityItem.status = "completed";
+
+      contextParts.push(
+        `### ${name}\n${resultText}`
+      );
+
+      console.log(`${name}: başarılı`);
+
+    } catch (error) {
+      const errorText =
+        error.message || String(error);
+
+      activityItem.status = "error";
+      activityItem.error = errorText;
+
+      contextParts.push(
+        `### ${name} - Bilgi alınamadı\n${errorText}`
+      );
+
+      console.error(
+        `${name} hatası:`,
+        errorText
+      );
+    }
+  }
+
+  console.log("Proje ön bilgisi tamamlandı.");
+  console.log("==================================\n");
+
+  return contextParts.join("\n\n");
+}
+
+// ==================================================
+// OLLAMA ARAÇ ŞEMALARI
+// ==================================================
+
+function toOllamaTools(tools) {
+  return tools.map(tool => ({
+    type: "function",
+    function: {
+      name: tool.name,
+      description:
+        tool.description ||
+        `After Effects MCP tool: ${tool.name}`,
+      parameters: tool.inputSchema || {
+        type: "object",
+        properties: {}
+      }
+    }
+  }));
+}
+
+// ==================================================
+// MCP PARAMETRELERİNİ DÜZELT
+// ==================================================
+
+function normalizeToolArguments(name, args) {
+  const normalized = { ...(args || {}) };
+
+  if (
+    name === "get_comp" &&
+    normalized.compId === undefined &&
+    normalized.id !== undefined
+  ) {
+    normalized.compId = normalized.id;
+    delete normalized.id;
+  }
+
+  return normalized;
+}
+
+// ==================================================
+// MCP SONUCUNU METNE ÇEVİR
+// ==================================================
+
+function toolResultToText(result) {
+  if (result?.structuredContent) {
+    return JSON.stringify(result.structuredContent);
+  }
+
+  return (result?.content || [])
+    .map(item => {
+      if (item.type === "text") {
+        return item.text;
+      }
+
+      return JSON.stringify(item);
+    })
+    .join("\n") || JSON.stringify(result);
+}
+
+// ==================================================
+// JSON ARAÇ ÇAĞRISINI YAKALA
+// ==================================================
+
+function extractJsonToolCall(content, availableTools) {
+  if (!content || typeof content !== "string") {
+    return null;
+  }
+
+  const cleaned = content
+    .replace(/```json/gi, "")
+    .replace(/```/g, "")
+    .trim();
+
+  const candidates = [cleaned];
+
+  const firstObject = cleaned.indexOf("{");
+  const lastObject = cleaned.lastIndexOf("}");
+
+  if (firstObject >= 0 && lastObject > firstObject) {
+    candidates.push(
+      cleaned.slice(firstObject, lastObject + 1)
+    );
+  }
+
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(candidate);
+
+      const name =
+        parsed.name ||
+        parsed.tool ||
+        parsed.function?.name;
+
+      const args =
+        parsed.arguments ??
+        parsed.parameters ??
+        parsed.function?.arguments ??
+        {};
+
+      if (
+        name &&
+        availableTools.some(tool => tool.name === name)
+      ) {
+        return {
+          name,
+          arguments:
+            typeof args === "string"
+              ? JSON.parse(args)
+              : args
+        };
+      }
+    } catch {
+      // Geçersiz JSON.
+    }
+  }
+
+  return null;
+}
+
+// ==================================================
+// MCP ARACI ÇALIŞTIR
+// ==================================================
+
+async function callMcpTool(name, args, availableTools) {
+  const knownTool = availableTools.find(
+    tool => tool.name === name
+  );
+
+  if (!knownTool) {
+    throw new Error(
+      `Bu görev için izin verilmeyen araç: ${name}`
+    );
+  }
+
+  if (BLOCKED_TOOLS.has(name)) {
+    throw new Error(`Bu araç devre dışı: ${name}`);
+  }
+
+  const normalizedArgs = normalizeToolArguments(
+    name,
+    args
+  );
+
+  console.log("\n----------------------------------");
+  console.log(`ARAÇ ÇALIŞIYOR: ${name}`);
+  console.log("GELEN PARAMETRELER:", args);
+  console.log("DÜZELTİLMİŞ PARAMETRELER:", normalizedArgs);
+  console.log("----------------------------------");
+
+  const result = await mcpClient.callTool({
+    name,
+    arguments: normalizedArgs
+  });
+
+  if (result?.isError) {
+    throw new Error(toolResultToText(result));
+  }
+
+  return toolResultToText(result);
+}
+
+// ==================================================
+// SİSTEM TALİMATI
+// ==================================================
+
+const systemPrompt = `
+Sen AE AI STUDIO adlı uygulamanın After Effects animasyon asistanısın.
+
+Görevin kullanıcının isteklerini Adobe After Effects içinde
+gerçek MCP araçlarını kullanarak gerçekleştirmektir.
+
+GENEL KURALLAR:
+
+1. Kullanıcının isteğini dikkatlice değerlendir.
+2. Kullanıcı sadece bilgi istiyorsa projeyi değiştirme.
+3. Tasarım isteniyorsa uygun MCP araçlarını kullan.
+4. Var olmayan araç isimleri uydurma.
+5. Gerçek araç parametre şemalarını kullan.
+6. Araç sonuçlarını dikkatlice incele.
+7. Başarılı araç çağrısını sebepsiz yere tekrarlama.
+8. Aynı araç ve aynı parametreleri tekrar çağırma.
+9. log_issue ve list_known_issues kullanma.
+10. Kullanıcı istemeden kompozisyon veya katman silme.
+11. Araç hata verirse aynı hatalı çağrıyı tekrarlama.
+12. İşlemleri mantıklı sırayla gerçekleştir.
+13. İşlem tamamlandığında Türkçe açıklama yap.
+14. Gerçekleştirmediğin işlemi tamamlanmış gibi gösterme.
+15. Gereksiz araç çağrısı yapma.
+
+ÖNEMLİ:
+
+- Projenin kayıtlı olup olmadığını tasarım şartı olarak kullanma.
+- Kullanıcı tasarım istiyorsa kayıtlı proje zorunluluğu uydurma.
+- Proje kaydedilmemiş olsa bile mevcut açık kompozisyonda çalışabilirsin.
+- Kullanıcı mevcut kompozisyonu kullanmanı istiyorsa yeni kompozisyon oluşturma.
+- Tasarım için gerekli proje bilgileri sana ayrıca verilebilir.
+- Sana verilmiş proje bilgilerini tekrar isteme veya tekrar araçla sorgulama.
+
+PARAMETRE BİLGİSİ:
+
+get_comp aracı kompozisyon kimliğini compId
+parametresiyle alır. id parametresi kullanma.
+
+Doğru örnek:
+get_comp({ "compId": 1 })
+
+TASARIM İŞ AKIŞI:
+
+Tasarım isteğinde:
+
+1. Sana verilen mevcut proje bilgisini incele.
+2. Kullanıcının hedef kompozisyonunu belirle.
+3. Mevcut kompozisyon varsa onu kullan.
+4. Kullanıcı açıkça istemedikçe yeni kompozisyon oluşturma.
+5. Katmanları mantıklı sırayla oluştur.
+6. Tasarımı görsel olarak tamamla.
+7. İsteniyorsa animasyon keyframe'lerini ekle.
+8. Araç sonuçlarını kontrol et.
+9. Tamamlanmayan işlemleri tamamlanmış gibi anlatma.
+
+HUD TASARIMI:
+
+Profesyonel HUD tasarımı istendiğinde:
+
+- Koyu bilim kurgu arka planı kullan.
+- Dengeli neon renkler kullan.
+- Dairesel radar halkaları oluştur.
+- Teknik çizgiler ve koordinat göstergeleri oluştur.
+- Bilgi panelleri ekle.
+- Küçük veri göstergeleri ve ölçüm alanları oluştur.
+- Katmanları anlamlı şekilde isimlendir.
+- Tasarımı görsel açıdan dengeli oluştur.
+- Animasyon için keyframe araçlarını kullan.
+- Gerekirse efektler ve maskeler kullan.
+- Gereksiz yere yeni kompozisyon oluşturma.
+- Var olan kompozisyonun çözünürlüğünü ve FPS değerini koru.
+- Sadece tek bir şekil oluşturup işi bitmiş sayma.
+- Birbirini tamamlayan birden fazla görsel öğe oluştur.
+- Tasarımın merkez, kenar ve bilgi alanlarını dengeli yerleştir.
+
+ARAÇ KULLANIMI:
+
+Bir işlem gerekiyorsa gerçek MCP araç çağrısı yap.
+
+Araç çağrısı yapmadan işlem yaptığını iddia etme.
+
+Araç sonucu başarılıysa sonraki mantıklı işleme geç.
+
+Bir araç başarısız olursa hatayı incele ve farklı parametrelerle
+düzeltmek mümkünse yeniden dene. Aynı hatalı çağrıyı tekrarlama.
+
+İşlem tamamlanınca kısa ve anlaşılır Türkçe özet ver.
+`;
+
+// ==================================================
+// OLLAMA SOHBET MOTORU
+// ==================================================
+
+async function chatWithOllama(userMessage, history) {
+  if (!mcpReady) {
+    throw new Error("MCP sunucusu henüz hazır değil.");
+  }
+
+  const {
+    taskType,
+    selectedTools
+  } = selectToolsForMessage(userMessage);
+
+  const activity = [];
+
+  let designContext = "";
+
+  if (taskType === "design") {
+    designContext = await getDesignContext(activity);
+  }
+
+  const tools = toOllamaTools(selectedTools);
+
+  const contextPrompt =
+    taskType === "design"
+      ? `
+
+AFTER EFFECTS MEVCUT PROJE BİLGİSİ:
+
+Aşağıdaki bilgiler sunucu tarafından tasarım başlamadan
+önce alınmıştır. Bu araçlar tekrar çağrılmamalıdır.
+
+${designContext}
+
+ÇOK ÖNEMLİ:
+- get_project_summary çağırma.
+- list_comps çağırma.
+- get_house_style çağırma.
+- Bu bilgiler zaten yukarıda verilmiştir.
+- Doğrudan kullanıcının tasarım isteğini gerçekleştir.
+- Mevcut kompozisyonu kullan.
+`
+      : "";
+
+  const safeHistory = Array.isArray(history)
+    ? history
+        .filter(item =>
+          item &&
+          ["user", "assistant"].includes(item.role) &&
+          typeof item.content === "string"
+        )
+        .slice(-10)
+    : [];
+
+  const messages = [
+    {
+      role: "system",
+      content: systemPrompt + contextPrompt
+    },
+    ...safeHistory,
+    {
+      role: "user",
+      content: userMessage
+    }
+  ];
+
+  let totalToolCalls = 0;
+
+  const executedCalls = new Set();
+
+  for (
+    let round = 0;
+    round < MAX_TOOL_ROUNDS;
+    round++
+  ) {
+    console.log(
+      `Ollama turu: ${round + 1}/${MAX_TOOL_ROUNDS}`
+    );
+
+    console.log("Ollama yanıtı bekleniyor...");
+
+    const response = await fetch(
+      `${OLLAMA_URL}/api/chat`,
+      {
+        method: "POST",
+
+        // Beş dakikalık Undici zaman aşımı ayarlarını kullan.
+        dispatcher: ollamaAgent,
+
+        headers: {
+          "Content-Type": "application/json"
+        },
+
+        body: JSON.stringify({
+          model: MODEL,
+          messages,
+          tools,
+          stream: false,
+
+          // Modelin bellekte kalma süresi.
+          keep_alive: "10m",
+
+          options: {
+            temperature: 0.1,
+            num_ctx: 4096
+          }
+        })
+      }
+    );
+
+    if (!response.ok) {
+      throw new Error(
+        `Ollama hatası (${response.status}): ${await response.text()}`
+      );
+    }
+
+    const data = await response.json();
+    const assistantMessage = data.message || {};
+
+    console.log(
+      "Ollama yanıtı alındı."
+    );
+
+    messages.push(assistantMessage);
+
+    let calls = assistantMessage.tool_calls || [];
+
+    if (!calls.length) {
+      const fallback = extractJsonToolCall(
+        assistantMessage.content,
+        selectedTools
+      );
+
+      if (fallback) {
+        calls = [{
+          function: {
+            name: fallback.name,
+            arguments: fallback.arguments
+          }
+        }];
+      }
+    }
+
+    if (!calls.length) {
+      return {
+        reply:
+          assistantMessage.content ||
+          "İşlem tamamlandı.",
+        activity
+      };
+    }
+
+    for (const call of calls) {
+      const name = call.function?.name;
+
+      const rawArgs =
+        call.function?.arguments ?? {};
+
+      let args;
+
+      try {
+        args =
+          typeof rawArgs === "string"
+            ? JSON.parse(rawArgs)
+            : rawArgs;
+      } catch {
+        args = {};
+      }
+
+      if (!name) {
+        continue;
+      }
+
+      if (
+        !selectedTools.some(tool => tool.name === name)
+      ) {
+        console.warn(
+          `İzin verilmeyen araç engellendi: ${name}`
+        );
+
+        return {
+          reply:
+            `Model izin verilmeyen bir araç çağırmaya çalıştı: ${name}. İşlem güvenlik nedeniyle durduruldu.`,
+          activity
+        };
+      }
+
+      if (totalToolCalls >= MAX_TOOL_CALLS) {
+        return {
+          reply:
+            "Araç çağrısı güvenlik sınırına ulaştı. Tamamlanan işlemler korunmuştur.",
+          activity
+        };
+      }
+
+      const normalizedArgs = normalizeToolArguments(
+        name,
+        args
+      );
+
+      const callKey =
+        name + ":" + JSON.stringify(normalizedArgs);
+
+      if (executedCalls.has(callKey)) {
+        console.warn(
+          `Tekrarlanan araç çağrısı engellendi: ${name}`
+        );
+
+        return {
+          reply:
+            `Tekrarlanan ${name} çağrısını engelledim. İşlem döngüsünü önlemek için durdum. Önceki başarılı işlemler korunmuştur.`,
+          activity
+        };
+      }
+
+      executedCalls.add(callKey);
+      totalToolCalls++;
+
+      const activityItem = {
+        type: "tool",
+        name,
+        status: "running"
+      };
+
+      activity.push(activityItem);
+
+      try {
+        const result = await callMcpTool(
+          name,
+          normalizedArgs,
+          selectedTools
+        );
+
+        messages.push({
+          role: "tool",
+          content: result,
+          tool_name: name
+        });
+
+        activityItem.status = "completed";
+
+      } catch (error) {
+        const errorText =
+          error.message || String(error);
+
+        console.error(
+          `MCP araç hatası (${name}):`,
+          errorText
+        );
+
+        messages.push({
+          role: "tool",
+          content: `Tool error: ${errorText}`,
+          tool_name: name
+        });
+
+        activityItem.status = "error";
+        activityItem.error = errorText;
+      }
+    }
+  }
+
+  return {
+    reply:
+      "Modelin araç çağrısı tur sınırına ulaştı. Tamamlanan işlemleri kontrol edebilirsin.",
+    activity
+  };
+}
+
+// ==================================================
+// HTTP SUNUCUSU
+// ==================================================
+
+const server = http.createServer(async (req, res) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Content-Type"
+  );
+
+  res.setHeader(
+    "Access-Control-Allow-Methods",
+    "GET, POST, OPTIONS"
+  );
+
+  if (req.method === "OPTIONS") {
+    res.writeHead(204).end();
+    return;
+  }
+
+  // DURUM API
+
+  if (
+    req.url === "/api/status" &&
+    req.method === "GET"
+  ) {
+    res.writeHead(200, {
+      "Content-Type": "application/json"
+    });
+
+    res.end(JSON.stringify({
+      mcp: mcpReady,
+      toolCount: mcpTools.length,
+      model: MODEL,
+      busy
+    }));
+
+    return;
+  }
+
+  // CHAT API
+
+  if (
+    req.url === "/api/chat" &&
+    req.method === "POST"
+  ) {
+    if (busy) {
+      res.writeHead(429, {
+        "Content-Type": "application/json"
+      });
+
+      res.end(JSON.stringify({
+        error: "Önceki istek hâlâ işleniyor."
+      }));
+
+      return;
+    }
+
+    busy = true;
+
+    let body = "";
+
+    req.on("data", chunk => {
+      body += chunk;
+
+      if (body.length > 2 * 1024 * 1024) {
+        req.destroy();
+      }
+    });
+
+    req.on("end", async () => {
+      try {
+        const payload = JSON.parse(body || "{}");
+
+        if (
+          typeof payload.message !== "string" ||
+          !payload.message.trim()
+        ) {
+          throw new Error("Mesaj boş olamaz.");
+        }
+
+        const result = await chatWithOllama(
+          payload.message.trim(),
+          Array.isArray(payload.history)
+            ? payload.history
+            : []
+        );
+
+        res.writeHead(200, {
+          "Content-Type": "application/json"
+        });
+
+        res.end(JSON.stringify(result));
+
+      } catch (error) {
+        console.error("Chat hatası:", error);
+
+        if (!res.headersSent) {
+          res.writeHead(500, {
+            "Content-Type": "application/json"
+          });
+
+          res.end(JSON.stringify({
+            error: error.message || String(error)
+          }));
+        }
+
+      } finally {
+        busy = false;
+      }
+    });
+
+    return;
+  }
+
+  // WEB ARAYÜZÜ
+
+  let requestedPath;
+
+  try {
+    requestedPath =
+      req.url === "/"
+        ? "/index.html"
+        : decodeURIComponent(req.url.split("?")[0]);
+  } catch {
+    res.writeHead(400).end("Bad request");
+    return;
+  }
+
+  const publicDirectory =
+    path.resolve(__dirname, "public");
+
+  const safePath = path.resolve(
+    publicDirectory,
+    "." + requestedPath
+  );
+
+  if (
+    safePath !== publicDirectory &&
+    !safePath.startsWith(publicDirectory + path.sep)
+  ) {
+    res.writeHead(403).end("Forbidden");
+    return;
+  }
+
+  fs.readFile(safePath, (error, content) => {
+    if (error) {
+      res.writeHead(404).end("Not found");
+      return;
+    }
+
+    const ext = path.extname(safePath);
+
+    const types = {
+      ".html": "text/html; charset=utf-8",
+      ".css": "text/css; charset=utf-8",
+      ".js": "text/javascript; charset=utf-8"
+    };
+
+    res.writeHead(200, {
+      "Content-Type":
+        types[ext] || "application/octet-stream"
+    });
+
+    res.end(content);
+  });
+});
+
+// ==================================================
+// BAŞLAT
+// ==================================================
+
+try {
+  await connectMcp();
+} catch (error) {
+  console.error("MCP bağlantı hatası:", error);
+}
+
+server.listen(PORT, () => {
+  console.log("\n==================================");
+  console.log("AE AI STUDIO ÇALIŞIYOR");
+  console.log("==================================");
+  console.log(`Adres: http://localhost:${PORT}`);
+  console.log(`Model: ${MODEL}`);
+  console.log(`Maksimum araç turu: ${MAX_TOOL_ROUNDS}`);
+  console.log(`Maksimum araç çağrısı: ${MAX_TOOL_CALLS}`);
+  console.log("Ollama başlık zaman aşımı: 300 saniye");
+  console.log("Ollama bağlam uzunluğu: 4096");
+  console.log("==================================\n");
+});
+
+// ==================================================
+// GÜVENLİ KAPATMA
+// ==================================================
+
+process.on("SIGINT", async () => {
+  console.log("\nAE AI STUDIO kapatılıyor...");
+
+  await mcpClient?.close().catch(() => {});
+  await ollamaAgent.close().catch(() => {});
+
+  server.close(() => {
+    process.exit(0);
+  });
+});

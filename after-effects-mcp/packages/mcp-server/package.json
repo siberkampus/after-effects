@@ -1,0 +1,67 @@
+{
+  "name": "@engine-room/after-effects-mcp",
+  "version": "0.5.2",
+  "type": "module",
+  "description": "Control Adobe After Effects with AI — describe the animation you want and it gets built: layers, keyframes, effects, expressions and text, all editable afterwards.",
+  "license": "MIT",
+  "author": "Engine Room",
+  "homepage": "https://github.com/Engine-Room-Games/after-effects-mcp#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Engine-Room-Games/after-effects-mcp.git",
+    "directory": "packages/mcp-server"
+  },
+  "funding": "https://github.com/sponsors/migus88",
+  "bugs": {
+    "url": "https://github.com/Engine-Room-Games/after-effects-mcp/issues"
+  },
+  "keywords": [
+    "after-effects",
+    "adobe",
+    "ai",
+    "animation",
+    "motion-graphics",
+    "video",
+    "mcp",
+    "model-context-protocol",
+    "claude",
+    "extendscript"
+  ],
+  "bin": {
+    "after-effects-mcp": "bin/server.js"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "bin",
+    "panel",
+    "README.md",
+    "LICENSE"
+  ],
+  "os": [
+    "darwin",
+    "win32"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "watch": "tsc -p tsconfig.json --watch",
+    "prepack": "node ../../scripts/prepare-package.mjs",
+    "clean": "rm -rf dist bin panel"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "ws": "^8.22.0",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@engineroom/shared": "*",
+    "@types/node": "^22.20.5",
+    "@types/ws": "^8.18.2",
+    "esbuild": "^0.28.2",
+    "typescript": "^6.0.3"
+  }
+}

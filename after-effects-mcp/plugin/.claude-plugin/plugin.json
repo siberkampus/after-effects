@@ -1,0 +1,21 @@
+{
+  "name": "after-effects",
+  "displayName": "After Effects",
+  "version": "0.5.2",
+  "description": "Control Adobe After Effects with AI — describe the animation you want and it gets built: layers, keyframes, effects, expressions and text, all editable afterwards.",
+  "author": {
+    "name": "Engine Room",
+    "url": "https://github.com/Engine-Room-Games"
+  },
+  "homepage": "https://github.com/Engine-Room-Games/after-effects-mcp#readme",
+  "repository": "https://github.com/Engine-Room-Games/after-effects-mcp",
+  "license": "MIT",
+  "keywords": [
+    "after-effects",
+    "adobe",
+    "ai",
+    "animation",
+    "motion-graphics",
+    "video"
+  ]
+}

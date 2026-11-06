@@ -1,0 +1,134 @@
+name: Release
+
+# Publishes to npm the tarball `scripts/release.sh` built, when the GitHub
+# release it created is published.
+#
+# Nothing is built here, and nothing is signed (issue #182). The tarball carries
+# an After Effects panel signed on the release machine, before the tag was
+# pushed, together with the .mcpb and binaries — all from one signing. Building
+# here would mean signing here, after the tag: Rosetta, a tool download and a
+# timestamp server, each able to fail once the release is already public. So
+# release.sh packs, signs, installs and smoke-runs the tarball first, attaches
+# it to the release, and this workflow only checks it is the right version and
+# publishes that exact file.
+#
+# Authentication is OIDC trusted publishing: GitHub proves this workflow's
+# identity to npm directly and npm mints a short-lived credential for the job.
+# There is no NPM_TOKEN — nothing to rotate, nothing to leak. npm also attaches
+# a provenance attestation, naming this repository, commit and workflow as the
+# publisher. (It does not attest that this workflow built the file — it did not;
+# the tarball is the release asset, whose SHA-256 the log prints.)
+#
+# One-time setup, in this order:
+#   1. `npm publish` once from a laptop to create the package
+#   2. npmjs.com -> the package -> Settings -> Trusted Publisher:
+#        repository  Engine-Room-Games/after-effects-mcp
+#        workflow    release.yml
+#   3. every release after that is `make release`
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag whose attached tarball to publish (e.g. v0.6.0)"
+        required: true
+
+permissions:
+  contents: read
+
+# The pinned npm, never npm@latest: a new npm release cannot change the publish
+# between one tag and the next. OIDC trusted publishing needs npm >= 11.5.1.
+# Bump NPM_VERSION deliberately.
+env:
+  NPM_VERSION: "11.6.2"
+  NODE_VERSION: "24"
+
+jobs:
+  publish:
+    runs-on: macos-latest
+    permissions:
+      id-token: write # required for OIDC
+      contents: read # to download the release asset
+    steps:
+      # NOTE: deliberately no `registry-url`. It makes setup-node write
+      # `//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}` into .npmrc; with
+      # no NODE_AUTH_TOKEN set, npm sees an empty token, decides auth is already
+      # configured, and never starts the OIDC exchange.
+      # See https://github.com/actions/setup-node/issues/1551
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install the pinned npm
+        run: |
+          npm install -g "npm@${NPM_VERSION}"
+          npm --version
+
+      - name: Confirm the OIDC environment is present
+        run: |
+          if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
+            echo "::error::No OIDC token endpoint — the job is missing id-token: write." >&2
+            exit 1
+          fi
+          if [ -f .npmrc ] && grep -q "_authToken" .npmrc; then
+            echo "::error::.npmrc contains an _authToken line; npm will skip OIDC. Remove registry-url from setup-node." >&2
+            exit 1
+          fi
+          echo "OIDC endpoint present, no conflicting .npmrc"
+
+      # No checkout, no npm ci, no lifecycle scripts: nothing from the package
+      # runs in the job that holds the publish credential (issue #171).
+      - name: Download the tarball attached to the release
+        id: tarball
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/pkg"
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern 'engine-room-after-effects-mcp-*.tgz' --dir "$RUNNER_TEMP/pkg"
+          FILES=("$RUNNER_TEMP"/pkg/*.tgz)
+          [ ${#FILES[@]} -eq 1 ] || { echo "::error::expected exactly one tarball on $TAG, found ${#FILES[@]}" >&2; exit 1; }
+          TARBALL="${FILES[0]}"
+          PKG=$(tar -xOzf "$TARBALL" package/package.json | node -p 'JSON.parse(require("fs").readFileSync(0, "utf8")).version')
+          if [ "${TAG#v}" != "$PKG" ]; then
+            echo "::error::Tag $TAG does not match the tarball's version $PKG" >&2
+            exit 1
+          fi
+          # The digest release.sh recorded in the annotated tag, before anything
+          # was pushed, for the very file it smoke-ran. A missing line or a
+          # different file refuses the publish: the asset is not what was tested.
+          REF=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG")
+          [ "$(jq -r .object.type <<<"$REF")" = "tag" ] || { echo "::error::$TAG is not an annotated tag; it carries no tarball digest" >&2; exit 1; }
+          MESSAGE=$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$(jq -r .object.sha <<<"$REF")" --jq .message)
+          EXPECTED=$(sed -n 's/^npm-tarball-sha256: *\([0-9a-f]\{64\}\) *$/\1/p' <<<"$MESSAGE" | head -1)
+          [ -n "$EXPECTED" ] || { echo "::error::the $TAG tag message records no npm-tarball-sha256" >&2; exit 1; }
+          ACTUAL=$(shasum -a 256 "$TARBALL" | cut -d' ' -f1)
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "::error::the attached tarball's sha256 is $ACTUAL, but the $TAG tag records $EXPECTED — refusing to publish" >&2
+            exit 1
+          fi
+          # The panel inside must be the signed one; release.sh verified it with
+          # Adobe's tool, this only confirms the right file was attached.
+          tar -tzf "$TARBALL" | grep -qx 'package/panel/META-INF/signatures.xml' \
+            || { echo "::error::the tarball's panel is not signed" >&2; exit 1; }
+          echo "Publishing $(basename "$TARBALL") ($PKG), sha256 $ACTUAL, as recorded in the $TAG tag"
+          echo "path=$TARBALL" >> "$GITHUB_OUTPUT"
+
+      # npm only *warns* when it rewrites the manifest at publish time, and a
+      # dropped bin entry is invisible until someone's npx fails. release.sh
+      # already refused that; checked again on the file actually published.
+      - name: Fail on manifest auto-correction
+        run: |
+          set -euo pipefail
+          out=$(npm publish "${{ steps.tarball.outputs.path }}" --dry-run --ignore-scripts 2>&1)
+          echo "$out"
+          if grep -qE "invalid and removed|auto-corrected" <<<"$out"; then
+            echo "::error::npm rewrote the manifest on publish — fix package.json before releasing." >&2
+            exit 1
+          fi
+
+      - name: Publish
+        run: npm publish "${{ steps.tarball.outputs.path }}" --ignore-scripts --provenance

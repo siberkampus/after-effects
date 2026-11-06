@@ -1,0 +1,182 @@
+﻿<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AE AI STUDIO</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;background:#0b0d12;color:#e8eaf0;font-family:Inter,Segoe UI,Arial,sans-serif;height:100vh;display:flex}
+.sidebar{width:245px;background:#10131b;border-right:1px solid #252a36;padding:24px 17px;display:flex;flex-direction:column}
+.brand{font-size:19px;font-weight:800;letter-spacing:1px;margin-bottom:7px}
+.brand span{color:#7c8cff}
+.sub{font-size:11px;color:#777f91;margin-bottom:30px}
+.status{font-size:12px;color:#9ba3b5;line-height:2}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:#e5a33b;margin-right:8px}
+.dot.ok{background:#40cf91}
+.main{flex:1;display:flex;flex-direction:column;min-width:0}
+.top{height:65px;border-bottom:1px solid #252a36;display:flex;align-items:center;justify-content:space-between;padding:0 28px}
+.top strong{font-size:13px;letter-spacing:.5px}
+.model{font-size:11px;color:#929bad;background:#171b25;border:1px solid #292f3c;padding:8px 12px;border-radius:8px}
+.chat{flex:1;overflow:auto;padding:35px max(24px,calc((100% - 850px)/2))}
+.welcome{margin:9vh auto 0;max-width:650px;text-align:center}
+.welcome h1{font-size:32px;margin-bottom:10px}
+.welcome h1 span{color:#8b96ff}
+.welcome p{color:#929bad;font-size:14px;line-height:1.7}
+.examples{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:28px;text-align:left}
+.example{background:#121722;border:1px solid #272e3c;border-radius:11px;padding:15px;color:#cbd0dc;font-size:12px;cursor:pointer}
+.example:hover{border-color:#7c8cff}
+.message{display:flex;gap:13px;margin:0 0 25px;align-items:flex-start}
+.avatar{width:30px;height:30px;flex-shrink:0;border-radius:9px;background:#252b3c;display:grid;place-items:center;font-size:12px;font-weight:700}
+.message.assistant .avatar{background:#30345e;color:#b8bdff}
+.bubble{font-size:14px;line-height:1.75;white-space:pre-wrap;overflow-wrap:anywhere;max-width:100%}
+.message.user .bubble{background:#171d2a;border:1px solid #293247;padding:12px 15px;border-radius:12px}
+.activity{font-size:11px;color:#8e9aff;margin-top:8px}
+.composer-wrap{padding:15px 24px 23px}
+.composer{max-width:850px;margin:auto;border:1px solid #343b4c;background:#131722;border-radius:15px;padding:12px;display:flex;gap:10px;align-items:flex-end}
+textarea{flex:1;resize:none;min-height:44px;max-height:150px;background:transparent;border:0;outline:0;color:#fff;font:14px inherit;padding:12px}
+button{border:0;border-radius:10px;background:#737ff0;color:white;padding:12px 19px;font-weight:700;cursor:pointer}
+button:disabled{opacity:.45;cursor:wait}
+.hint{text-align:center;color:#626b7d;font-size:10px;margin-top:10px}
+@media(max-width:700px){.sidebar{width:62px;padding:15px 8px}.brand{font-size:0}.brand span{font-size:16px}.sub,.status{display:none}.examples{grid-template-columns:1fr}.top{padding:0 14px}.chat{padding:22px 14px}}
+</style>
+</head>
+<body>
+<aside class="sidebar">
+  <div class="brand">AE <span>AI STUDIO</span></div>
+  <div class="sub">LOCAL MOTION GRAPHICS AGENT</div>
+  <div class="status">
+    <div><span class="dot" id="mcpDot"></span><span id="mcpStatus">MCP kontrol ediliyor</span></div>
+    <div><span class="dot" id="ollamaDot"></span><span id="ollamaStatus">Ollama kontrol ediliyor</span></div>
+    <div id="toolCount" style="margin:8px 0 0 16px"></div>
+  </div>
+</aside>
+<main class="main">
+  <header class="top">
+    <strong>AFTER EFFECTS ASSISTANT</strong>
+    <div class="model" id="modelName">LOCAL MODEL</div>
+  </header>
+  <section class="chat" id="chat">
+    <div class="welcome" id="welcome">
+      <h1>Hayal et. <span>Oluşturalım.</span></h1>
+      <p>After Effects projelerini doğal dille yönet. HUD tasarımları, motion graphics, animasyonlar ve render işlemleri için isteğini yaz.</p>
+      <div class="examples">
+        <div class="example" onclick="useExample(this)">Fütüristik mavi bir HUD arayüzü oluştur. Ekranda dairesel tarama animasyonu ve veri panelleri olsun.</div>
+        <div class="example" onclick="useExample(this)">Yeni bir 1920x1080 kompozisyon oluştur ve içine animasyonlu teknoloji başlıkları yerleştir.</div>
+        <div class="example" onclick="useExample(this)">Aktif After Effects projemin özetini ve mevcut katmanlarını göster.</div>
+        <div class="example" onclick="useExample(this)">Mevcut sahneyi analiz et ve animasyon kalitesini geliştirmek için öneriler sun.</div>
+      </div>
+    </div>
+  </section>
+  <div class="composer-wrap">
+    <div class="composer">
+      <textarea id="prompt" placeholder="After Effects'te ne oluşturmak istiyorsun?" rows="1"></textarea>
+      <button id="send" onclick="sendMessage()">Gönder ↑</button>
+    </div>
+    <div class="hint">Yerel Ollama modeli · Yerel MCP bağlantısı · şlemler After Effects'te gerçekleştirilir</div>
+  </div>
+</main>
+<script>
+const chat = document.getElementById("chat");
+const promptBox = document.getElementById("prompt");
+const sendButton = document.getElementById("send");
+let history = [];
+
+function useExample(el) {
+  promptBox.value = el.textContent;
+  promptBox.focus();
+}
+
+function addMessage(role, text, activity=[]) {
+  document.getElementById("welcome")?.remove();
+
+  const row = document.createElement("div");
+  row.className = `message ${role}`;
+
+  const avatar = document.createElement("div");
+  avatar.className = "avatar";
+  avatar.textContent = role === "user" ? "SEN" : "AE";
+
+  const body = document.createElement("div");
+  body.style.minWidth = "0";
+  const bubble = document.createElement("div");
+  bubble.className = "bubble";
+  bubble.textContent = text;
+  body.appendChild(bubble);
+
+  if (activity.length) {
+    const log = document.createElement("div");
+    log.className = "activity";
+    log.textContent = activity.map(x =>
+      `${x.status === "completed" ? "✓" : x.status === "error" ? "!" : "•"} ${x.name}`
+    ).join("   ·   ");
+    body.appendChild(log);
+  }
+
+  row.append(avatar, body);
+  chat.appendChild(row);
+  chat.scrollTop = chat.scrollHeight;
+}
+
+async function sendMessage() {
+  const message = promptBox.value.trim();
+  if (!message || sendButton.disabled) return;
+
+  addMessage("user", message);
+  promptBox.value = "";
+  sendButton.disabled = true;
+  sendButton.textContent = "Çalışıyor…";
+
+  try {
+    const response = await fetch("/api/chat", {
+      method: "POST",
+      headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({message, history})
+    });
+
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || "stek başarısız.");
+
+    addMessage("assistant", data.reply || "Yanıt alınamadı.", data.activity || []);
+    history.push(
+      {role:"user", content:message},
+      {role:"assistant", content:data.reply || ""}
+    );
+    history = history.slice(-12);
+  } catch (error) {
+    addMessage("assistant", "Hata: " + error.message);
+  } finally {
+    sendButton.disabled = false;
+    sendButton.textContent = "Gönder ↑";
+    promptBox.focus();
+  }
+}
+
+promptBox.addEventListener("keydown", event => {
+  if (event.key === "Enter" && !event.shiftKey) {
+    event.preventDefault();
+    sendMessage();
+  }
+});
+
+async function checkStatus() {
+  try {
+    const response = await fetch("/api/status");
+    const data = await response.json();
+
+    document.getElementById("mcpDot").className = "dot " + (data.mcp ? "ok" : "");
+    document.getElementById("mcpStatus").textContent = data.mcp ? "MCP bağlı" : "MCP bağlantısı yok";
+    document.getElementById("toolCount").textContent = data.toolCount + " araç bulundu";
+    document.getElementById("modelName").textContent = data.model;
+
+    const ollamaResponse = await fetch("http://127.0.0.1:11434/api/tags");
+    document.getElementById("ollamaDot").className = "dot " + (ollamaResponse.ok ? "ok" : "");
+    document.getElementById("ollamaStatus").textContent = ollamaResponse.ok ? "Ollama çalışıyor" : "Ollama erişilemiyor";
+  } catch {
+    document.getElementById("mcpStatus").textContent = "Backend bağlantısı yok";
+  }
+}
+checkStatus();
+</script>
+</body>
+</html>
