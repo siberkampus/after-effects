@@ -189,11 +189,23 @@ function selectToolsForMessage(message) {
   console.log(
     selectedTools.map(tool => tool.name).join(", ")
   );
-  const schemaChars = selectedTools.reduce(
-    (total, tool) => total + JSON.stringify(tool.inputSchema || {}).length,
+  const schemaSizes = selectedTools
+    .map(tool => ({
+      name: tool.name,
+      chars: JSON.stringify(tool.inputSchema || {}).length
+    }))
+    .sort((a, b) => b.chars - a.chars);
+
+  const schemaChars = schemaSizes.reduce(
+    (total, tool) => total + tool.chars,
     0
   );
+
   console.log(`Modele gönderilen araç sayısı: ${selectedTools.length}`);
+  console.log("ARAÇ ŞEMASI BOYUTLARI (büyükten küçüğe):");
+  for (const tool of schemaSizes) {
+    console.log(`  ${tool.name}: ${tool.chars} karakter`);
+  }
   console.log(`Araç şemalarının toplam boyutu: ${schemaChars} karakter`);
   console.log("==================================\n");
 
