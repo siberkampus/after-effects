@@ -35,7 +35,7 @@ const BLOCKED_TOOLS = new Set([
 // Ollama bağlantısı için geniş zaman aşımı.
 const ollamaAgent = new Agent({
   headersTimeout: 300000,
-  bodyTimeout: 300000,
+  bodyTimeout: 600000,
   connectTimeout: 30000
 });
 
@@ -312,6 +312,101 @@ function toOllamaTools(tools) {
     }
   }));
 }
+
+/**
+ * Read Ollama's NDJSON chat stream and reconstruct the same message shape
+ * that the non-streaming API returns. Qwen 3 supports streamed tool calls.
+ */
+async function readOllamaStream(response) {
+  const reader = response.body?.getReader();
+
+  if (!reader) {
+    throw new Error("Ollama yanıt akışı okunamadı: response body bulunamadı.");
+  }
+
+  const decoder = new TextDecoder();
+  const assistantMessage = {
+    role: "assistant",
+    content: ""
+  };
+
+  let buffer = "";
+  let finalChunk = null;
+  let messageChunks = 0;
+
+  const consumeLine = line => {
+    const trimmed = line.trim();
+    if (!trimmed) return;
+
+    const chunk = JSON.parse(trimmed);
+
+    if (chunk.error) {
+      throw new Error(chunk.error);
+    }
+
+    if (chunk.message && typeof chunk.message === "object") {
+      messageChunks++;
+
+      if (chunk.message.role) {
+        assistantMessage.role = chunk.message.role;
+      }
+
+      if (typeof chunk.message.content === "string") {
+        assistantMessage.content += chunk.message.content;
+      }
+
+      // Ollama emits the tool-call array as a message chunk. Keep the complete
+      // array; the final statistics chunk normally has no tool_calls field.
+      if (
+        Array.isArray(chunk.message.tool_calls) &&
+        chunk.message.tool_calls.length > 0
+      ) {
+        assistantMessage.tool_calls = chunk.message.tool_calls;
+      }
+    }
+
+    if (chunk.done === true) {
+      finalChunk = chunk;
+    }
+  };
+
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+
+      const lines = buffer.split(/\r?\n/);
+      buffer = lines.pop() || "";
+
+      for (const line of lines) {
+        consumeLine(line);
+      }
+    }
+
+    buffer += decoder.decode();
+
+    if (buffer.trim()) {
+      consumeLine(buffer);
+    }
+  } catch (error) {
+    await reader.cancel().catch(() => {});
+    throw error;
+  } finally {
+    reader.releaseLock();
+  }
+
+  if (!finalChunk && messageChunks === 0) {
+    throw new Error("Ollama boş veya tamamlanmamış bir yanıt akışı döndürdü.");
+  }
+
+  return {
+    ...(finalChunk || {}),
+    message: assistantMessage
+  };
+}
+
 
 // ==================================================
 // MCP PARAMETRELERİNİ DÜZELT
@@ -645,7 +740,7 @@ ${designContext}
           model: MODEL,
           messages,
           tools,
-          stream: false,
+          stream: true,
 
           // Modelin bellekte kalma süresi.
           keep_alive: "10m",
@@ -664,12 +759,25 @@ ${designContext}
       );
     }
 
-    const data = await response.json();
+    console.log("Ollama HTTP yanıtı alındı; akış okunuyor.");
+    const data = await readOllamaStream(response);
     const assistantMessage = data.message || {};
 
-    console.log(
-      "Ollama yanıtı alındı."
-    );
+    if (Number.isFinite(data.prompt_eval_count) || Number.isFinite(data.eval_count)) {
+      const promptSeconds = Number.isFinite(data.prompt_eval_duration)
+        ? (data.prompt_eval_duration / 1e9).toFixed(1)
+        : "?";
+      const outputSeconds = Number.isFinite(data.eval_duration)
+        ? (data.eval_duration / 1e9).toFixed(1)
+        : "?";
+
+      console.log(
+        `Ollama ölçümü: giriş ${data.prompt_eval_count ?? "?"} token / ${promptSeconds} sn; ` +
+        `çıktı ${data.eval_count ?? "?"} token / ${outputSeconds} sn.`
+      );
+    }
+
+    console.log("Ollama akışı tamamlandı.");
 
     messages.push(assistantMessage);
 
