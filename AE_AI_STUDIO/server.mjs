@@ -741,6 +741,7 @@ ${designContext}
           messages,
           tools,
           stream: true,
+          think: false,
 
           // Modelin bellekte kalma süresi.
           keep_alive: "10m",
