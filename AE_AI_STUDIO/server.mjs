@@ -635,6 +635,16 @@ Geçerli content türleri:
   Bu bölümdeki şemaya dön ve yalnızca geçerli alanlarla yeni çağrı yap.
 - Bir add_shape_content çağrısı başarısızsa aynı hatalı yapıyı tekrarlama.
 
+TASARIM GÖREVLERİNDE ÇIKTI KURALI (ÇOK ÖNEMLİ):
+
+- İç düşünce, analiz, plan, varsayım veya açıklama metni yazma.
+- "Let's", "First", "Wait" gibi planlama metinleri üretme.
+- Tasarım görevinde ilk yanıtın doğrudan gerçek MCP tool_calls olmalıdır.
+- Bir turda yalnızca gerçekten gerekli olan 1-3 araç çağrısı yap; sonuçları aldıktan sonra devam et.
+- Kompozisyon yoksa çözünürlük/FPS/süre uydurma. create_comp çağırmadan önce kullanıcıdan eksik zorunlu kompozisyon ayarını sor.
+- Araç çağrısı üretemiyorsan uzun açıklama yazma; tek cümleyle eksik bilgiyi sor.
+- Her şeklin parametrelerini ilgili aracın şemasına göre üret.
+
 TASARIM İŞ AKIŞI:
 
 Tasarım isteğinde:
@@ -790,7 +800,7 @@ ${designContext}
           options: {
             temperature: 0.1,
             num_ctx: 8192,
-            num_predict: 1800
+            num_predict: 512
           }
         })
       }
