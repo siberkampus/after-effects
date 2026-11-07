@@ -594,6 +594,47 @@ parametresiyle alır. id parametresi kullanma.
 Doğru örnek:
 get_comp({ "compId": 1 })
 
+SHAPE CONTENT ŞEMASI — KESİN PARAMETRE KURALLARI:
+
+add_shape_content aracında content alanı strict şemadır. Aşağıdaki alanlar dışında
+alan gönderme. fillColor, fill, width, height, w, h, x ve y GEÇERSİZDİR.
+
+Üst seviye:
+- compId: number
+- layerId: number
+- content: aşağıdaki türlerden biri
+- parentGroupPath: yalnızca mevcut bir grup içine ekleme yaparken kullanılır.
+  Kök Contents alanına eklerken parentGroupPath alanını tamamen ATLA.
+- zOrder: isteğe bağlı "back" veya "front".
+
+Geçerli content türleri:
+1. Dikdörtgen:
+{"type":"rect","name":"Panel","size":[300,120],"position":[0,0],"roundness":12}
+2. Daire/elips:
+{"type":"ellipse","name":"Radar","size":[240,240],"position":[0,0]}
+3. Yıldız/poligon:
+{"type":"star","name":"Marker","points":6,"outerRadius":20,"innerRadius":10,"position":[0,0]}
+4. Yol:
+{"type":"path","name":"Outline","vertices":[[0,0],[100,0],[100,100],[0,100]],"closed":true}
+5. Dolgu (geometriden AYRI bir çağrı):
+{"type":"fill","color":"#00ffcc","opacity":100}
+6. Kontur (geometriden AYRI bir çağrı):
+{"type":"stroke","color":"#00ffcc","width":3,"opacity":100,"lineCap":"round","lineJoin":"round"}
+7. Grup: {"type":"group","name":"Radar Group"}
+8. Trim: {"type":"trim","start":0,"end":75,"offset":0}
+9. Repeater: {"type":"repeater","copies":8,"offset":0}
+10. Merge: {"type":"merge","mode":1}
+
+ÖNEMLİ UYGULAMA:
+- Rect ve ellipse için boyut "size":[genişlik,yükseklik], konum "position":[x,y] şeklindedir.
+- Renk/çizgi rect veya ellipse içine yazılmaz. Önce geometriyi, sonra ayrı add_shape_content
+  çağrısıyla type:"fill" veya type:"stroke" ekle.
+- Renk alanının adı yalnızca "color" ve değeri "#00ffcc" gibi HEX olabilir.
+- parentGroupPath kök seviyede boş dizi [] veya [""] OLAMAZ; kökte tamamen atla.
+- Araç hata mesajı bilinmeyen alanı bildirirse o alanı yeniden adlandırıp tahmin etme.
+  Bu bölümdeki şemaya dön ve yalnızca geçerli alanlarla yeni çağrı yap.
+- Bir add_shape_content çağrısı başarısızsa aynı hatalı yapıyı tekrarlama.
+
 TASARIM İŞ AKIŞI:
 
 Tasarım isteğinde:
@@ -748,7 +789,8 @@ ${designContext}
 
           options: {
             temperature: 0.1,
-            num_ctx: 8192
+            num_ctx: 8192,
+            num_predict: 1800
           }
         })
       }
