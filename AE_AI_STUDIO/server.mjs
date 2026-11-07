@@ -129,8 +129,19 @@ function classifyRequest(message) {
 // GÖREVE GÖRE ARAÇ SEÇ
 // ==================================================
 
+// A quoted, explicit text-layer request is a deterministic, one-tool task.
+// Do not expose the full HUD toolset to a small local model for this case.
+function isSimpleTextLayerRequest(message) {
+  const text = String(message || "");
+  const asksForText = /(metin|yazı|text)/i.test(text);
+  const asksToCreate = /(ekle|oluştur|yarat|create|add)/i.test(text);
+  const hasQuotedValue = /["“”'‘’][^"“”'‘’]{1,120}["“”'‘’]/.test(text);
+  return asksForText && asksToCreate && hasQuotedValue;
+}
+
 function selectToolsForMessage(message) {
   const taskType = classifyRequest(message);
+  const simpleTextTask = isSimpleTextLayerRequest(message);
 
   const readOnlyTools = [
     "get_project_summary",
@@ -173,8 +184,9 @@ function selectToolsForMessage(message) {
     "screenshot_layer"
   ];
 
-  const selectedNames =
-    taskType === "design"
+  const selectedNames = simpleTextTask
+    ? ["create_text_layer"]
+    : taskType === "design"
       ? designTools
       : readOnlyTools;
 
@@ -209,9 +221,14 @@ function selectToolsForMessage(message) {
   console.log(`Araç şemalarının toplam boyutu: ${schemaChars} karakter`);
   console.log("==================================\n");
 
+  if (simpleTextTask) {
+    console.log("HIZLI METİN KATMANI MODU: yalnızca create_text_layer aracı sunulacak.");
+  }
+
   return {
     taskType,
-    selectedTools
+    selectedTools,
+    simpleTextTask
   };
 }
 
@@ -219,14 +236,14 @@ function selectToolsForMessage(message) {
 // TASARIM ÖNCESİ PROJE BİLGİSİNİ AL
 // ==================================================
 
-async function getDesignContext(activity) {
+async function getDesignContext(activity, toolNames = DESIGN_CONTEXT_TOOLS) {
   console.log("\n==================================");
   console.log("TASARIM ÖNCESİ PROJE BİLGİSİ ALINIYOR");
   console.log("==================================");
 
   const contextParts = [];
 
-  for (const name of DESIGN_CONTEXT_TOOLS) {
+  for (const name of toolNames) {
     const knownTool = mcpTools.find(
       tool => tool.name === name
     );
@@ -704,7 +721,8 @@ async function chatWithOllama(userMessage, history) {
 
   const {
     taskType,
-    selectedTools
+    selectedTools,
+    simpleTextTask
   } = selectToolsForMessage(userMessage);
 
   const activity = [];
@@ -712,14 +730,26 @@ async function chatWithOllama(userMessage, history) {
   let designContext = "";
 
   if (taskType === "design") {
-    designContext = await getDesignContext(activity);
+    const contextTools = simpleTextTask
+      ? ["get_project_summary", "list_comps"]
+      : DESIGN_CONTEXT_TOOLS;
+    designContext = await getDesignContext(activity, contextTools);
   }
 
   const tools = toOllamaTools(selectedTools);
 
   const contextPrompt =
     taskType === "design"
-      ? `
+      ? simpleTextTask
+        ? `
+
+AFTER EFFECTS PROJE BİLGİSİ:
+${designContext}
+
+Bu bilgi sunucu tarafından alındı; tekrar okuma aracı çağırma.
+Aktif kompozisyonun compId değerini kullan.
+`
+        : `
 
 AFTER EFFECTS MEVCUT PROJE BİLGİSİ:
 
@@ -738,20 +768,30 @@ ${designContext}
 `
       : "";
 
-  const safeHistory = Array.isArray(history)
-    ? history
-        .filter(item =>
-          item &&
-          ["user", "assistant"].includes(item.role) &&
-          typeof item.content === "string"
-        )
-        .slice(-10)
-    : [];
+  const safeHistory = simpleTextTask
+    ? []
+    : Array.isArray(history)
+      ? history
+          .filter(item =>
+            item &&
+            ["user", "assistant"].includes(item.role) &&
+            typeof item.content === "string"
+          )
+          .slice(-10)
+      : [];
+
+  const simpleTextSystemPrompt = `You operate Adobe After Effects through MCP tools.
+For this request, call create_text_layer exactly once.
+The tool schema is authoritative. It requires compId; text is the requested string.
+It does NOT require layerId. Do not create a comp or any other layer.
+Use the active composition id from the supplied project information.
+If no active composition can be identified, ask one short question instead of inventing an id.
+Do not write analysis or a plan. Return the tool call only.`;
 
   const messages = [
     {
       role: "system",
-      content: systemPrompt + contextPrompt
+      content: (simpleTextTask ? simpleTextSystemPrompt : systemPrompt) + contextPrompt
     },
     ...safeHistory,
     {
@@ -800,7 +840,7 @@ ${designContext}
           options: {
             temperature: 0.1,
             num_ctx: 8192,
-            num_predict: 512
+            num_predict: simpleTextTask ? 128 : 512
           }
         })
       }
